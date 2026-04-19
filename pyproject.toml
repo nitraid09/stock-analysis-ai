@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-analysis-ai"
+version = "0.1.0"
+description = "Static HTML regeneration foundation for the stock analysis AI project."
+readme = "docs/specs/current/stock_analysis_ai_project_purpose_and_operation_spec_v0_21.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

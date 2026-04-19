@@ -1,0 +1,10 @@
+{
+  "terminal.integrated.defaultProfile.windows": "PowerShell (NoProfile)",
+  "terminal.integrated.profiles.windows": {
+    "PowerShell (NoProfile)": {
+      "source": "PowerShell",
+      "args": ["-NoProfile"]
+    }
+  },
+  "python.terminal.activateEnvironment": true
+}
