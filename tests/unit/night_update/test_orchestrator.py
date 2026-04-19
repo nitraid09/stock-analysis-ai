@@ -43,6 +43,16 @@ def _review_payload(*, reviews_text: str = "review", month_text: str = "month") 
     }
 
 
+def _us_pilot_payload(*, pilot_text: str = "pilot") -> dict:
+    return {
+        "screens": {
+            "us_pilot_performance": {
+                "sections": [{"id": "pilot_status", "title": "パイロット状況", "text": pilot_text}],
+            }
+        }
+    }
+
+
 def test_generation_failure_does_not_roll_back_master_or_dirty_latest(tmp_path) -> None:
     success = execute_night_update(
         NightUpdateRequest(
@@ -169,3 +179,60 @@ def test_merged_publish_keeps_unrelated_latest_screens(tmp_path) -> None:
     assert reviews.exists()
     assert "proposal-phase" in proposal_list.read_text(encoding="utf-8")
     assert "review-phase" in reviews.read_text(encoding="utf-8")
+
+
+def test_non_standard_evidence_parent_is_rejected_before_generation(tmp_path) -> None:
+    result = execute_night_update(
+        NightUpdateRequest(
+            generation_id="gen-invalid-evidence",
+            publish_mode="publish",
+            html_payload=_proposal_payload(),
+            display_condition={"series": "ai_official"},
+            table_updates={
+                "order_header": [
+                    {
+                        "order_id": "order-000001",
+                        "order_status": "filled",
+                        "reconciliation_status": "reconciled",
+                    }
+                ],
+                "position_cycle_registry": [{"position_cycle_id": "position-cycle-000001"}],
+                "evidence_ref": [
+                    {
+                        "parent": {
+                            "parent_type": "position_cycle",
+                            "parent_id": "position-cycle-000001",
+                        },
+                        "reference_path": "evidence/orders/position-cycle-000001.png",
+                    }
+                ],
+            },
+        ),
+        project_root=tmp_path,
+    )
+
+    assert result.master_update_status == "failed"
+    assert result.publish_result is None
+    assert result.failure_reason is not None
+    assert "Unsupported evidence parent type" in result.failure_reason
+
+
+def test_us_pilot_generation_runs_only_when_us_pilot_rows_change(tmp_path) -> None:
+    result = execute_night_update(
+        NightUpdateRequest(
+            generation_id="gen-us-pilot",
+            publish_mode="publish",
+            html_payload=_us_pilot_payload(),
+            display_condition={"series": "ai_official"},
+            table_updates={
+                "us_pilot_header": [{"us_pilot_id": "us-pilot-000001"}],
+            },
+        ),
+        project_root=tmp_path,
+    )
+
+    assert result.master_update_status == "success"
+    assert result.change_set is not None
+    assert result.change_set.changed_record_units == ("us_pilot",)
+    pilot_page = tmp_path / "generated_html" / "latest" / "us_pilot_performance" / "index.html"
+    assert pilot_page.exists()

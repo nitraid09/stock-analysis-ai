@@ -74,8 +74,6 @@ EVIDENCE_PARENT_TYPES: tuple[str, ...] = (
     "order",
     "holding_snapshot",
     "review",
-    "position_cycle",
-    "us_virtual_watch",
     "us_pilot",
 )
 
@@ -364,6 +362,12 @@ def _validate_evidence_rows(rows: tuple[dict[str, Any], ...]) -> None:
 
 def validate_master_storage_snapshot(snapshot: MasterStorageSnapshot) -> None:
     normalize_table_inventory(snapshot.tables)
+    for table_name, rows in snapshot.tables.items():
+        for row in rows:
+            if "payload_json" in row:
+                raise ContractError(
+                    f"{table_name} must not expose payload_json as a logical row field."
+                )
     for table_name, fields in STABLE_KEY_FIELDS_BY_TABLE.items():
         _validate_unique_stable_keys(snapshot.tables[table_name], fields, table_name)
 
@@ -372,7 +376,6 @@ def validate_master_storage_snapshot(snapshot: MasterStorageSnapshot) -> None:
     snapshot_ids = _collect_ids(snapshot.tables["holding_snapshot_header"], "snapshot_id")
     review_ids = _collect_ids(snapshot.tables["review_header"], "review_id")
     position_cycle_ids = _collect_ids(snapshot.tables["position_cycle_registry"], "position_cycle_id")
-    us_virtual_watch_ids = _collect_ids(snapshot.tables["us_virtual_watch_header"], "us_virtual_watch_id")
     us_pilot_ids = _collect_ids(snapshot.tables["us_pilot_header"], "us_pilot_id")
 
     for row in snapshot.tables["proposal_header"]:
@@ -444,16 +447,6 @@ def validate_master_storage_snapshot(snapshot: MasterStorageSnapshot) -> None:
             )
         if parent.parent_type == "review" and parent.parent_id not in review_ids:
             raise ContractError(f"evidence_ref references unknown review parent: {parent.parent_id}")
-        if parent.parent_type == "position_cycle" and parent.parent_id not in position_cycle_ids:
-            raise ContractError(
-                "evidence_ref references unknown position_cycle parent: "
-                f"{parent.parent_id}"
-            )
-        if parent.parent_type == "us_virtual_watch" and parent.parent_id not in us_virtual_watch_ids:
-            raise ContractError(
-                "evidence_ref references unknown us_virtual_watch parent: "
-                f"{parent.parent_id}"
-            )
         if parent.parent_type == "us_pilot" and parent.parent_id not in us_pilot_ids:
             raise ContractError(f"evidence_ref references unknown us_pilot parent: {parent.parent_id}")
 

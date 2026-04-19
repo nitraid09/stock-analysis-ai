@@ -44,8 +44,6 @@ EVIDENCE_PARENT_UNIT: dict[str, str] = {
     "order": "order",
     "holding_snapshot": "holding_snapshot",
     "review": "review",
-    "position_cycle": "order",
-    "us_virtual_watch": "us_virtual",
     "us_pilot": "us_pilot",
 }
 
