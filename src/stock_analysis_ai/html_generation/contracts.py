@@ -116,6 +116,8 @@ class PublishRequest:
     acceptance_passed: bool = True
     archive_month: str | None = None
     additional_screens: Sequence[str] = ()
+    display_condition: Mapping[str, Any] | None = None
+    evaluation_series: Sequence[str] = ()
 
     def __post_init__(self) -> None:
         if not self.generation_id.strip():
@@ -127,6 +129,8 @@ class PublishRequest:
             parts = self.archive_month.split("-")
             if len(parts) != 2 or len(parts[0]) != 4 or len(parts[1]) != 2:
                 raise ContractError("archive_month must use YYYY-MM format.")
+        if self.display_condition is not None and not isinstance(self.display_condition, Mapping):
+            raise ContractError("display_condition must be a mapping when provided.")
 
     @property
     def metadata(self) -> GenerationMetadata:

@@ -178,6 +178,8 @@ def execute_publish(request: PublishRequest, output_root: Path | None = None) ->
         "generated_at": request.metadata.iso_generated_at(),
         "publish_mode": request.publish_mode,
         "change_set": list(request.change_set),
+        "display_condition": dict(request.display_condition or {}),
+        "evaluation_series": list(request.evaluation_series),
         "affected_screens": list(affected_screens),
         "archive_month": request.archive_month,
     }
