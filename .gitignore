@@ -2,3 +2,13 @@
 __pycache__/
 .pytest_cache/
 *.pyc
+
+src/stock_analysis_ai.egg-info/
+
+generated_html/
+archive/
+logs/
+temp/
+backup/
+master/storage/
+evidence/
