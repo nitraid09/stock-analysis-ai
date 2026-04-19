@@ -52,6 +52,7 @@ PRIMARY_STABLE_KEYS: tuple[str, ...] = (
     "position_cycle_id",
     "snapshot_id",
     "review_id",
+    "evidence_ref_id",
 )
 RESERVATION_ONLY_KEYS: tuple[str, ...] = (
     "us_virtual_watch_id",
@@ -63,6 +64,30 @@ RECONCILIATION_STATUSES: tuple[str, ...] = (
     "unreconciled",
     "reconciled",
     "evidence_replaced",
+)
+ORDER_STATUSES: tuple[str, ...] = (
+    "none",
+    "submitted",
+    "partially_filled",
+    "filled",
+    "cancelled",
+    "expired",
+)
+PROPOSAL_STATUSES: tuple[str, ...] = (
+    "proposed",
+    "pass",
+    "zero_new_entry",
+    "invalidated",
+    "closed",
+)
+POSITION_STATUSES: tuple[str, ...] = (
+    "not_open",
+    "open",
+    "closed",
+)
+REVIEW_SCOPE_TYPES: tuple[str, ...] = (
+    "individual",
+    "period",
 )
 REVIEW_PRIMARY_SUBJECT_TYPES: tuple[str, ...] = (
     "proposal",
@@ -132,6 +157,7 @@ TABLE_CONTRACTS: dict[str, TableContract] = {
     "evidence_ref": TableContract(
         table_name="evidence_ref",
         role="supporting",
+        stable_key_fields=("evidence_ref_id",),
     ),
     "us_virtual_watch_header": TableContract(
         table_name="us_virtual_watch_header",
@@ -194,6 +220,10 @@ class MasterStoragePaths:
     @property
     def sqlite_file(self) -> Path:
         return self.storage_root / "master_storage.sqlite3"
+
+    @property
+    def backup_root(self) -> Path:
+        return self.project_root / "backup" / "master_storage"
 
 
 @dataclass(frozen=True)
@@ -338,6 +368,9 @@ def _validate_unique_stable_keys(
 def _validate_review_rows(rows: tuple[dict[str, Any], ...]) -> None:
     for row in rows:
         _ensure_non_blank(row.get("review_id"), "review_id")
+        review_scope_type = row.get("review_scope_type")
+        if review_scope_type is not None and review_scope_type not in REVIEW_SCOPE_TYPES:
+            raise ContractError(f"Unsupported review_scope_type: {review_scope_type}")
         primary_subject = row.get("primary_subject")
         if not isinstance(primary_subject, Mapping):
             raise ContractError("review_header rows must contain primary_subject.")
@@ -353,6 +386,7 @@ def _validate_reference_path(value: Any) -> str:
 
 def _validate_evidence_rows(rows: tuple[dict[str, Any], ...]) -> None:
     for row in rows:
+        _ensure_non_blank(row.get("evidence_ref_id"), "evidence_ref_id")
         parent = row.get("parent")
         if not isinstance(parent, Mapping):
             raise ContractError("evidence_ref rows must contain a single parent mapping.")
@@ -380,13 +414,18 @@ def validate_master_storage_snapshot(snapshot: MasterStorageSnapshot) -> None:
 
     for row in snapshot.tables["proposal_header"]:
         _ensure_non_blank(row.get("proposal_id"), "proposal_id")
+        proposal_status = row.get("proposal_status")
+        if proposal_status is not None and proposal_status not in PROPOSAL_STATUSES:
+            raise ContractError(f"Unsupported proposal_status: {proposal_status}")
     for row in snapshot.tables["proposal_target"]:
         proposal_id = _ensure_non_blank(row.get("proposal_id"), "proposal_id")
         if proposal_id not in proposal_ids:
             raise ContractError(f"proposal_target references unknown proposal_id: {proposal_id}")
     for row in snapshot.tables["order_header"]:
         _ensure_non_blank(row.get("order_id"), "order_id")
-        _ensure_non_blank(row.get("order_status"), "order_status")
+        order_status = _ensure_non_blank(row.get("order_status"), "order_status")
+        if order_status not in ORDER_STATUSES:
+            raise ContractError(f"Unsupported order_status: {order_status}")
         reconciliation_status = _ensure_non_blank(row.get("reconciliation_status"), "reconciliation_status")
         if reconciliation_status not in RECONCILIATION_STATUSES:
             raise ContractError(f"Unsupported reconciliation_status: {reconciliation_status}")
@@ -407,11 +446,20 @@ def validate_master_storage_snapshot(snapshot: MasterStorageSnapshot) -> None:
             raise ContractError(f"order_fill references unknown position_cycle_id: {position_cycle_id}")
     for row in snapshot.tables["holding_snapshot_header"]:
         _ensure_non_blank(row.get("snapshot_id"), "snapshot_id")
+        position_status = row.get("position_status")
+        if position_status is not None and position_status not in POSITION_STATUSES:
+            raise ContractError(f"Unsupported position_status: {position_status}")
     for row in snapshot.tables["holding_snapshot_position"]:
         snapshot_id = _ensure_non_blank(row.get("snapshot_id"), "snapshot_id")
         if snapshot_id not in snapshot_ids:
             raise ContractError(
                 f"holding_snapshot_position references unknown snapshot_id: {snapshot_id}"
+            )
+        position_cycle_id = row.get("position_cycle_id")
+        if position_cycle_id and position_cycle_id not in position_cycle_ids:
+            raise ContractError(
+                "holding_snapshot_position references unknown position_cycle_id: "
+                f"{position_cycle_id}"
             )
 
     _validate_review_rows(snapshot.tables["review_header"])
@@ -477,12 +525,16 @@ __all__ = [
     "MasterStorageSnapshot",
     "MasterStorageTransactionContract",
     "OPTIONAL_TABLES",
+    "ORDER_STATUSES",
     "PARENT_TABLES",
+    "POSITION_STATUSES",
     "PRIMARY_STABLE_KEYS",
+    "PROPOSAL_STATUSES",
     "RECONCILIATION_STATUSES",
     "REQUIRED_TABLES",
     "RESERVATION_ONLY_KEYS",
     "REVIEW_PRIMARY_SUBJECT_TYPES",
+    "REVIEW_SCOPE_TYPES",
     "ReviewPrimarySubject",
     "STABLE_KEY_FIELDS_BY_TABLE",
     "SUPPORTING_TABLES",

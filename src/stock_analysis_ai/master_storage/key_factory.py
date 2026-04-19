@@ -14,6 +14,7 @@ KEY_PREFIXES: dict[str, str] = {
     "position_cycle_id": "position-cycle",
     "snapshot_id": "snapshot",
     "review_id": "review",
+    "evidence_ref_id": "evidence-ref",
     "us_virtual_watch_id": "us-virtual-watch",
     "us_pilot_id": "us-pilot",
 }

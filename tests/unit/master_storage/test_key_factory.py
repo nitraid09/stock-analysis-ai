@@ -12,5 +12,6 @@ def test_stable_key_factory_reserves_required_and_optional_key_spaces() -> None:
     assert factory.reserve("position_cycle_id") == "position-cycle-000001"
     assert factory.reserve("snapshot_id") == "snapshot-000001"
     assert factory.reserve("review_id") == "review-000001"
+    assert factory.reserve("evidence_ref_id") == "evidence-ref-000001"
     assert factory.reserve("us_virtual_watch_id") == "us-virtual-watch-000001"
     assert factory.reserve("us_pilot_id") == "us-pilot-000001"

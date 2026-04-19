@@ -60,6 +60,7 @@ def test_master_storage_repository_uses_sqlite_core_without_json_master_file(tmp
     assert "payload_json" not in holding_position_columns
     assert "payload_json" not in position_cycle_columns
     assert "payload_json" not in evidence_columns
+    assert "evidence_ref_id" in evidence_columns
 
 
 def test_master_storage_source_does_not_expose_json_primary_contract_naming() -> None:
@@ -123,6 +124,7 @@ def test_evidence_ref_requires_exactly_one_parent_lineage() -> None:
     )
     tables["evidence_ref"].append(
         {
+            "evidence_ref_id": "evidence-ref-000001",
             "reference_path": "evidence/orders/order-000001.png",
             "parent": {"parent_type": "order", "parent_id": ""},
         }
@@ -262,6 +264,7 @@ def test_evidence_ref_appends_without_replacing_sibling_references(tmp_path) -> 
     assert len(evidence_rows) == 2
     assert any(row.get("status") == "superseded" for row in evidence_rows)
     assert any(row["reference_path"].endswith("-b.png") for row in evidence_rows)
+    assert all(row["evidence_ref_id"].startswith("evidence-ref-") for row in evidence_rows)
 
 
 def test_evidence_ref_rejects_non_header_standard_parent_types() -> None:
@@ -269,6 +272,7 @@ def test_evidence_ref_rejects_non_header_standard_parent_types() -> None:
     tables["position_cycle_registry"].append({"position_cycle_id": "position-cycle-000001"})
     tables["evidence_ref"].append(
         {
+            "evidence_ref_id": "evidence-ref-000001",
             "reference_path": "evidence/orders/position-cycle-000001.png",
             "parent": {
                 "parent_type": "position_cycle",

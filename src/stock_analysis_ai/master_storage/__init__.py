@@ -1,8 +1,7 @@
-"""SQLite-centered repository and adapter for the master storage boundary."""
+"""SQLite-centered repository and migration boundary for master storage."""
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -10,240 +9,34 @@ from typing import Any, Mapping, Sequence
 
 from stock_analysis_ai.html_generation.exceptions import ContractError
 
-from .contracts import (
-    ALL_TABLES,
-    MasterStoragePaths,
-    MasterStorageSnapshot,
-    STABLE_KEY_FIELDS_BY_TABLE,
-    validate_master_storage_snapshot,
+from .contracts import ALL_TABLES, MasterStoragePaths, MasterStorageSnapshot, STABLE_KEY_FIELDS_BY_TABLE
+from .key_factory import StableKeyFactory
+from .migration import (
+    MasterStorageMigrationResult,
+    MasterStoragePreflightResult,
+    MasterStorageVerifyResult,
+    migrate_master_storage,
+    preflight_master_storage,
+    verify_master_storage,
 )
-
-_HEADER_TABLES: tuple[str, ...] = (
-    "proposal_header",
-    "order_header",
-    "holding_snapshot_header",
-    "review_header",
-    "us_virtual_watch_header",
-    "us_pilot_header",
+from .schema import (
+    create_completed_schema,
+    configure_connection,
+    ensure_completed_schema,
+    load_snapshot_from_connection,
+    normalize_non_header_row,
+    replace_snapshot_in_connection,
 )
-
-_NON_HEADER_COLUMNS: dict[str, tuple[str, ...]] = {
-    "proposal_target": ("proposal_id", "target_code"),
-    "order_fill": (
-        "order_id",
-        "fill_id",
-        "position_cycle_id",
-        "security_code",
-        "signed_quantity",
-        "executed_at",
-        "fill_status",
-    ),
-    "holding_snapshot_position": ("snapshot_id", "security_code", "quantity"),
-    "position_cycle_registry": (
-        "position_cycle_id",
-        "security_code",
-        "entry_order_id",
-        "status",
-        "remaining_quantity",
-        "opened_by_order_id",
-        "closed_by_order_id",
-        "last_order_id",
-    ),
-    "evidence_ref": ("parent_type", "parent_id", "reference_path", "status"),
-}
-
-_NON_HEADER_ALLOWED_FIELDS: dict[str, frozenset[str]] = {
-    "proposal_target": frozenset({"proposal_id", "target_code"}),
-    "order_fill": frozenset(
-        {
-            "order_id",
-            "fill_id",
-            "position_cycle_id",
-            "security_code",
-            "signed_quantity",
-            "executed_at",
-            "fill_status",
-        }
-    ),
-    "holding_snapshot_position": frozenset({"snapshot_id", "security_code", "quantity"}),
-    "position_cycle_registry": frozenset(
-        {
-            "position_cycle_id",
-            "security_code",
-            "entry_order_id",
-            "status",
-            "remaining_quantity",
-            "opened_by_order_id",
-            "closed_by_order_id",
-            "last_order_id",
-        }
-    ),
-    "evidence_ref": frozenset({"parent", "reference_path", "status"}),
-}
-
-_CREATE_STATEMENTS: dict[str, str] = {
-    "proposal_header": """
-        CREATE TABLE IF NOT EXISTS proposal_header (
-            proposal_id TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL
-        )
-    """,
-    "proposal_target": """
-        CREATE TABLE IF NOT EXISTS proposal_target (
-            internal_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            proposal_id TEXT NOT NULL,
-            target_code TEXT
-        )
-    """,
-    "order_header": """
-        CREATE TABLE IF NOT EXISTS order_header (
-            order_id TEXT PRIMARY KEY,
-            proposal_id TEXT,
-            position_cycle_id TEXT,
-            order_status TEXT NOT NULL,
-            reconciliation_status TEXT NOT NULL,
-            payload_json TEXT NOT NULL
-        )
-    """,
-    "order_fill": """
-        CREATE TABLE IF NOT EXISTS order_fill (
-            internal_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_id TEXT NOT NULL,
-            fill_id TEXT,
-            position_cycle_id TEXT,
-            security_code TEXT,
-            signed_quantity TEXT,
-            executed_at TEXT,
-            fill_status TEXT
-        )
-    """,
-    "holding_snapshot_header": """
-        CREATE TABLE IF NOT EXISTS holding_snapshot_header (
-            snapshot_id TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL
-        )
-    """,
-    "holding_snapshot_position": """
-        CREATE TABLE IF NOT EXISTS holding_snapshot_position (
-            internal_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id TEXT NOT NULL,
-            security_code TEXT,
-            quantity TEXT
-        )
-    """,
-    "review_header": """
-        CREATE TABLE IF NOT EXISTS review_header (
-            review_id TEXT PRIMARY KEY,
-            primary_subject_type TEXT NOT NULL,
-            primary_subject_id TEXT NOT NULL,
-            payload_json TEXT NOT NULL
-        )
-    """,
-    "position_cycle_registry": """
-        CREATE TABLE IF NOT EXISTS position_cycle_registry (
-            position_cycle_id TEXT PRIMARY KEY,
-            security_code TEXT,
-            entry_order_id TEXT,
-            status TEXT,
-            remaining_quantity TEXT,
-            opened_by_order_id TEXT,
-            closed_by_order_id TEXT,
-            last_order_id TEXT
-        )
-    """,
-    "evidence_ref": """
-        CREATE TABLE IF NOT EXISTS evidence_ref (
-            internal_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            parent_type TEXT NOT NULL,
-            parent_id TEXT NOT NULL,
-            reference_path TEXT NOT NULL,
-            status TEXT
-        )
-    """,
-    "us_virtual_watch_header": """
-        CREATE TABLE IF NOT EXISTS us_virtual_watch_header (
-            us_virtual_watch_id TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL
-        )
-    """,
-    "us_pilot_header": """
-        CREATE TABLE IF NOT EXISTS us_pilot_header (
-            us_pilot_id TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL
-        )
-    """,
-}
-
-_TABLE_ORDER_BY: dict[str, str] = {
-    "proposal_header": "proposal_id",
-    "proposal_target": "internal_row_id",
-    "order_header": "order_id",
-    "order_fill": "internal_row_id",
-    "holding_snapshot_header": "snapshot_id",
-    "holding_snapshot_position": "internal_row_id",
-    "review_header": "review_id",
-    "position_cycle_registry": "position_cycle_id",
-    "evidence_ref": "internal_row_id",
-    "us_virtual_watch_header": "us_virtual_watch_id",
-    "us_pilot_header": "us_pilot_id",
-}
 
 
 def _canonical_row(row: Mapping[str, Any]) -> str:
+    import json
+
     return json.dumps(dict(row), ensure_ascii=False, sort_keys=True)
 
 
 def _canonical_row_collection(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     return tuple(sorted(_canonical_row(row) for row in rows))
-
-
-def _normalize_non_header_row(table_name: str, row: Mapping[str, Any]) -> dict[str, Any]:
-    if "payload_json" in row:
-        raise ContractError(f"{table_name} must not accept payload_json as a logical field.")
-    unexpected = sorted(set(row) - _NON_HEADER_ALLOWED_FIELDS[table_name])
-    if unexpected:
-        raise ContractError(
-            f"{table_name} received unsupported logical fields: {', '.join(unexpected)}"
-        )
-    if table_name == "evidence_ref":
-        parent = row.get("parent")
-        if not isinstance(parent, Mapping):
-            raise ContractError("evidence_ref rows must provide parent.")
-        normalized = {
-            "parent": {
-                "parent_type": parent.get("parent_type"),
-                "parent_id": parent.get("parent_id"),
-            },
-            "reference_path": row.get("reference_path"),
-        }
-        if row.get("status") is not None:
-            normalized["status"] = row.get("status")
-        return normalized
-    normalized_row = {field_name: row.get(field_name) for field_name in _NON_HEADER_ALLOWED_FIELDS[table_name]}
-    return {
-        field_name: value
-        for field_name, value in normalized_row.items()
-        if value is not None
-    }
-
-
-def _decode_non_header_row(table_name: str, row: sqlite3.Row) -> dict[str, Any]:
-    if table_name == "evidence_ref":
-        decoded: dict[str, Any] = {
-            "parent": {
-                "parent_type": row["parent_type"],
-                "parent_id": row["parent_id"],
-            },
-            "reference_path": row["reference_path"],
-        }
-        if row["status"] is not None:
-            decoded["status"] = row["status"]
-        return decoded
-    return {
-        column_name: row[column_name]
-        for column_name in _NON_HEADER_COLUMNS[table_name]
-        if row[column_name] is not None
-    }
 
 
 class SqliteMasterStorageAdapter:
@@ -255,186 +48,36 @@ class SqliteMasterStorageAdapter:
     def connect(self) -> sqlite3.Connection:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.database_path)
-        connection.row_factory = sqlite3.Row
-        self.ensure_schema(connection)
+        configure_connection(connection)
+        try:
+            ensure_completed_schema(connection)
+        except ContractError as exc:
+            connection.close()
+            raise ContractError(
+                "master_storage schema is not ready. Run explicit preflight/migrate/verify instead of silent auto-migration."
+            ) from exc
         return connection
 
-    def ensure_schema(self, connection: sqlite3.Connection) -> None:
-        for statement in _CREATE_STATEMENTS.values():
-            connection.execute(statement)
-        self._validate_physical_schema(connection)
+    def bootstrap_empty_database(self) -> None:
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            configure_connection(connection)
+            create_completed_schema(connection)
+            connection.commit()
+        finally:
+            connection.close()
 
-    def _validate_physical_schema(self, connection: sqlite3.Connection) -> None:
-        for table_name in _HEADER_TABLES:
-            columns = {
-                row["name"]
-                for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-            }
-            if "payload_json" not in columns:
-                raise ContractError(f"{table_name} must retain payload_json for header supplemental data.")
-        for table_name, required_columns in _NON_HEADER_COLUMNS.items():
-            columns = {
-                row["name"]
-                for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-            }
-            if "payload_json" in columns:
-                raise ContractError(
-                    f"{table_name} still contains legacy payload_json storage and requires migration."
-                )
-            missing_columns = [column_name for column_name in required_columns if column_name not in columns]
-            if missing_columns:
-                raise ContractError(
-                    f"{table_name} is missing required scaffold columns: {', '.join(missing_columns)}"
-                )
+    @staticmethod
+    def load_snapshot(connection: sqlite3.Connection) -> MasterStorageSnapshot:
+        return load_snapshot_from_connection(connection)
 
-    def load_snapshot(self, connection: sqlite3.Connection) -> MasterStorageSnapshot:
-        tables: dict[str, tuple[dict[str, Any], ...]] = {}
-        for table_name in ALL_TABLES:
-            if table_name in _HEADER_TABLES:
-                rows = connection.execute(
-                    f"SELECT payload_json FROM {table_name} ORDER BY {_TABLE_ORDER_BY[table_name]}"
-                ).fetchall()
-                tables[table_name] = tuple(json.loads(row["payload_json"]) for row in rows)
-                continue
-            select_columns = ", ".join(_NON_HEADER_COLUMNS[table_name])
-            rows = connection.execute(
-                f"SELECT {select_columns} FROM {table_name} ORDER BY {_TABLE_ORDER_BY[table_name]}"
-            ).fetchall()
-            tables[table_name] = tuple(_decode_non_header_row(table_name, row) for row in rows)
-        snapshot = MasterStorageSnapshot(tables=tables)
-        validate_master_storage_snapshot(snapshot)
-        return snapshot
-
+    @staticmethod
     def replace_snapshot(
-        self,
         connection: sqlite3.Connection,
         snapshot: MasterStorageSnapshot,
     ) -> None:
-        validate_master_storage_snapshot(snapshot)
-        for table_name in ALL_TABLES:
-            connection.execute(f"DELETE FROM {table_name}")
-        for table_name in ALL_TABLES:
-            for row in snapshot.tables[table_name]:
-                connection.execute(
-                    self._insert_statement(table_name),
-                    self._extract_insert_values(table_name, row),
-                )
-
-    @staticmethod
-    def _insert_statement(table_name: str) -> str:
-        if table_name == "proposal_header":
-            return "INSERT INTO proposal_header (proposal_id, payload_json) VALUES (?, ?)"
-        if table_name == "proposal_target":
-            return "INSERT INTO proposal_target (proposal_id, target_code) VALUES (?, ?)"
-        if table_name == "order_header":
-            return (
-                "INSERT INTO order_header "
-                "(order_id, proposal_id, position_cycle_id, order_status, reconciliation_status, payload_json) "
-                "VALUES (?, ?, ?, ?, ?, ?)"
-            )
-        if table_name == "order_fill":
-            return (
-                "INSERT INTO order_fill "
-                "(order_id, fill_id, position_cycle_id, security_code, signed_quantity, executed_at, fill_status) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)"
-            )
-        if table_name == "holding_snapshot_header":
-            return "INSERT INTO holding_snapshot_header (snapshot_id, payload_json) VALUES (?, ?)"
-        if table_name == "holding_snapshot_position":
-            return (
-                "INSERT INTO holding_snapshot_position (snapshot_id, security_code, quantity) "
-                "VALUES (?, ?, ?)"
-            )
-        if table_name == "review_header":
-            return (
-                "INSERT INTO review_header "
-                "(review_id, primary_subject_type, primary_subject_id, payload_json) VALUES (?, ?, ?, ?)"
-            )
-        if table_name == "position_cycle_registry":
-            return (
-                "INSERT INTO position_cycle_registry "
-                "(position_cycle_id, security_code, entry_order_id, status, remaining_quantity, "
-                "opened_by_order_id, closed_by_order_id, last_order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-            )
-        if table_name == "evidence_ref":
-            return (
-                "INSERT INTO evidence_ref (parent_type, parent_id, reference_path, status) "
-                "VALUES (?, ?, ?, ?)"
-            )
-        if table_name == "us_virtual_watch_header":
-            return "INSERT INTO us_virtual_watch_header (us_virtual_watch_id, payload_json) VALUES (?, ?)"
-        if table_name == "us_pilot_header":
-            return "INSERT INTO us_pilot_header (us_pilot_id, payload_json) VALUES (?, ?)"
-        raise ContractError(f"Unsupported table_name: {table_name}")
-
-    @staticmethod
-    def _extract_insert_values(table_name: str, row: Mapping[str, Any]) -> tuple[Any, ...]:
-        if table_name in _HEADER_TABLES:
-            payload_json = json.dumps(dict(row), ensure_ascii=False, sort_keys=True)
-            if table_name == "proposal_header":
-                return (row.get("proposal_id"), payload_json)
-            if table_name == "order_header":
-                return (
-                    row.get("order_id"),
-                    row.get("proposal_id"),
-                    row.get("position_cycle_id"),
-                    row.get("order_status"),
-                    row.get("reconciliation_status"),
-                    payload_json,
-                )
-            if table_name == "holding_snapshot_header":
-                return (row.get("snapshot_id"), payload_json)
-            if table_name == "review_header":
-                primary_subject = row.get("primary_subject", {})
-                return (
-                    row.get("review_id"),
-                    primary_subject.get("subject_type"),
-                    primary_subject.get("subject_id"),
-                    payload_json,
-                )
-            if table_name == "us_virtual_watch_header":
-                return (row.get("us_virtual_watch_id"), payload_json)
-            if table_name == "us_pilot_header":
-                return (row.get("us_pilot_id"), payload_json)
-        normalized_row = _normalize_non_header_row(table_name, row)
-        if table_name == "proposal_target":
-            return (normalized_row.get("proposal_id"), normalized_row.get("target_code"))
-        if table_name == "order_fill":
-            return (
-                normalized_row.get("order_id"),
-                normalized_row.get("fill_id"),
-                normalized_row.get("position_cycle_id"),
-                normalized_row.get("security_code"),
-                normalized_row.get("signed_quantity"),
-                normalized_row.get("executed_at"),
-                normalized_row.get("fill_status"),
-            )
-        if table_name == "holding_snapshot_position":
-            return (
-                normalized_row.get("snapshot_id"),
-                normalized_row.get("security_code"),
-                normalized_row.get("quantity"),
-            )
-        if table_name == "position_cycle_registry":
-            return (
-                normalized_row.get("position_cycle_id"),
-                normalized_row.get("security_code"),
-                normalized_row.get("entry_order_id"),
-                normalized_row.get("status"),
-                normalized_row.get("remaining_quantity"),
-                normalized_row.get("opened_by_order_id"),
-                normalized_row.get("closed_by_order_id"),
-                normalized_row.get("last_order_id"),
-            )
-        if table_name == "evidence_ref":
-            parent = normalized_row["parent"]
-            return (
-                parent.get("parent_type"),
-                parent.get("parent_id"),
-                normalized_row.get("reference_path"),
-                normalized_row.get("status"),
-            )
-        raise ContractError(f"Unsupported table_name: {table_name}")
+        replace_snapshot_in_connection(connection, snapshot)
 
 
 class MasterStorageTransaction(AbstractContextManager["MasterStorageTransaction"]):
@@ -472,6 +115,8 @@ class MasterStorageRepository:
         self._adapter = SqliteMasterStorageAdapter(self.paths.sqlite_file)
 
     def transaction(self) -> MasterStorageTransaction:
+        if not self.paths.sqlite_file.exists():
+            self._adapter.bootstrap_empty_database()
         return MasterStorageTransaction(self._adapter)
 
     def load_snapshot(self) -> MasterStorageSnapshot:
@@ -483,12 +128,22 @@ class MasterStorageRepository:
             transaction.replace_snapshot(snapshot)
         return snapshot
 
+    def preflight(self) -> MasterStoragePreflightResult:
+        return preflight_master_storage(self.paths.project_root)
+
+    def migrate(self) -> MasterStorageMigrationResult:
+        return migrate_master_storage(self.paths.project_root)
+
+    def verify(self) -> MasterStorageVerifyResult:
+        return verify_master_storage(self.paths.project_root)
+
     def apply_table_changes(
         self,
         snapshot: MasterStorageSnapshot,
         table_changes: Mapping[str, Sequence[Mapping[str, Any]]],
     ) -> MasterStorageSnapshot:
         tables = snapshot.to_mutable_tables()
+        key_factory = StableKeyFactory.from_snapshot(snapshot)
         for table_name, rows in table_changes.items():
             if table_name not in ALL_TABLES:
                 raise ContractError(f"Unsupported table_name: {table_name}")
@@ -503,12 +158,12 @@ class MasterStorageRepository:
                 self._merge_immutable_child_rows(tables[table_name], normalized_rows, "snapshot_id", table_name)
                 continue
             if table_name == "evidence_ref":
-                self._append_or_supersede_evidence_rows(tables[table_name], normalized_rows)
+                self._append_or_supersede_evidence_rows(tables[table_name], normalized_rows, key_factory)
                 continue
             if table_name == "position_cycle_registry":
                 self._upsert_rows(
                     tables[table_name],
-                    [_normalize_non_header_row(table_name, row) for row in normalized_rows],
+                    [normalize_non_header_row(table_name, row) for row in normalized_rows],
                     STABLE_KEY_FIELDS_BY_TABLE.get(table_name, ()),
                 )
                 continue
@@ -517,9 +172,7 @@ class MasterStorageRepository:
                 normalized_rows,
                 STABLE_KEY_FIELDS_BY_TABLE.get(table_name, ()),
             )
-        updated_snapshot = MasterStorageSnapshot(tables={name: tuple(rows) for name, rows in tables.items()})
-        validate_master_storage_snapshot(updated_snapshot)
-        return updated_snapshot
+        return MasterStorageSnapshot(tables={name: tuple(rows) for name, rows in tables.items()})
 
     @staticmethod
     def _upsert_rows(
@@ -551,7 +204,7 @@ class MasterStorageRepository:
         parent_key_field: str,
         table_name: str,
     ) -> None:
-        normalized_rows = [_normalize_non_header_row(table_name, row) for row in new_rows]
+        normalized_rows = [normalize_non_header_row(table_name, row) for row in new_rows]
         grouped_new_rows: dict[Any, list[dict[str, Any]]] = {}
         for row in normalized_rows:
             grouped_new_rows.setdefault(row.get(parent_key_field), []).append(row)
@@ -578,7 +231,7 @@ class MasterStorageRepository:
             for row in existing_rows
             if row.get("fill_id") is not None
         }
-        for row in [_normalize_non_header_row("order_fill", row) for row in new_rows]:
+        for row in [normalize_non_header_row("order_fill", row) for row in new_rows]:
             canonical_row = _canonical_row(row)
             if canonical_row in existing_canonical_rows:
                 continue
@@ -598,6 +251,7 @@ class MasterStorageRepository:
     def _append_or_supersede_evidence_rows(
         existing_rows: list[dict[str, Any]],
         new_rows: list[dict[str, Any]],
+        key_factory: StableKeyFactory,
     ) -> None:
         index = {
             (
@@ -607,7 +261,7 @@ class MasterStorageRepository:
             ): position
             for position, row in enumerate(existing_rows)
         }
-        for row in [_normalize_non_header_row("evidence_ref", row) for row in new_rows]:
+        for row in [normalize_non_header_row("evidence_ref", row) for row in new_rows]:
             identity = (
                 row["parent"].get("parent_type"),
                 row["parent"].get("parent_id"),
@@ -615,17 +269,28 @@ class MasterStorageRepository:
             )
             existing_position = index.get(identity)
             if existing_position is None:
+                if not row.get("evidence_ref_id"):
+                    row["evidence_ref_id"] = key_factory.reserve("evidence_ref_id")
                 index[identity] = len(existing_rows)
                 existing_rows.append(row)
                 continue
-            if _canonical_row(existing_rows[existing_position]) != _canonical_row(row):
+            persisted_row = dict(existing_rows[existing_position])
+            if not row.get("evidence_ref_id"):
+                row["evidence_ref_id"] = persisted_row.get("evidence_ref_id")
+            if _canonical_row(persisted_row) != _canonical_row(row):
                 existing_rows[existing_position] = row
 
 
 __all__ = [
+    "MasterStorageMigrationResult",
+    "MasterStoragePaths",
+    "MasterStoragePreflightResult",
     "MasterStorageRepository",
     "MasterStorageSnapshot",
-    "MasterStoragePaths",
     "MasterStorageTransaction",
+    "MasterStorageVerifyResult",
     "SqliteMasterStorageAdapter",
+    "migrate_master_storage",
+    "preflight_master_storage",
+    "verify_master_storage",
 ]
