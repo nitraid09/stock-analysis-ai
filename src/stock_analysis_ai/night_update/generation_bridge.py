@@ -48,8 +48,8 @@ def invoke_generation_bridge(
         change_set=bridge_input.change_set.to_html_change_tokens(),
         publish_mode=bridge_input.publish_mode,
         acceptance_passed=bridge_input.acceptance_passed,
-        archive_month=bridge_input.archive_month,
-        display_condition=bridge_input.display_condition,
+        archive_target_period=bridge_input.archive_month,
+        default_display_context=bridge_input.display_condition,
         evaluation_series=bridge_input.evaluation_series,
     )
     return execute_publish(request, output_root=output_root)

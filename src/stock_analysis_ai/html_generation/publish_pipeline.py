@@ -8,8 +8,15 @@ from pathlib import Path
 from typing import Iterable
 from uuid import uuid4
 
-from .contracts import PublishRequest, PublishResult, RenderedPage
-from .exceptions import PublishError
+from .contracts import (
+    GenerationStatusRecord,
+    LatestAction,
+    OperationLogRecord,
+    PublishRequest,
+    PublishResult,
+    RenderedPage,
+)
+from .exceptions import PublishError, PublishSwapError
 from .paths import HtmlOutputPaths, discover_project_root
 from .payload_builder import build_render_inputs
 from .renderers import render_many
@@ -28,6 +35,12 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _append_jsonl(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
 def _write_rendered_pages(public_root: Path, pages: Iterable[RenderedPage]) -> None:
     for page in pages:
         target = public_root / Path(*page.relative_output_path.parts)
@@ -35,27 +48,12 @@ def _write_rendered_pages(public_root: Path, pages: Iterable[RenderedPage]) -> N
         target.write_text(page.html, encoding="utf-8")
 
 
-def _write_status(
-    generation_root: Path,
-    *,
-    status: str,
-    accepted: bool,
-    published: bool,
-    archived: bool,
-    errors: list[str],
-    rendered_files: tuple[str, ...],
-) -> None:
-    _write_json(
-        generation_root / "status.json",
-        {
-            "status": status,
-            "accepted": accepted,
-            "published": published,
-            "archived": archived,
-            "errors": errors,
-            "rendered_files": list(rendered_files),
-        },
-    )
+def _write_status(path: Path, status_record: GenerationStatusRecord) -> None:
+    _write_json(path, status_record.to_dict())
+
+
+def _append_operation_log(path: Path, record: OperationLogRecord) -> None:
+    _append_jsonl(path, record.to_dict())
 
 
 def _build_result(
@@ -64,30 +62,29 @@ def _build_result(
     latest_root: Path,
     *,
     status: str,
-    accepted: bool,
-    published: bool,
-    archived: bool,
-    errors: list[str],
-    rendered_files: tuple[str, ...],
+    status_record: GenerationStatusRecord,
+    operation_log_path: Path,
 ) -> PublishResult:
-    _write_status(
-        generation_root,
-        status=status,
-        accepted=accepted,
-        published=published,
-        archived=archived,
-        errors=errors,
-        rendered_files=rendered_files,
+    errors = (
+        list(status_record.render_failures)
+        + list(status_record.publish_failures)
+        + list(status_record.archive_failures)
     )
     return PublishResult(
         generation_id=request.generation_id,
         status=status,
-        accepted=accepted,
-        published=published,
-        archived=archived,
-        rendered_files=rendered_files,
+        accepted=status_record.accepted,
+        published=status_record.publish_result == "succeeded",
+        archived=status_record.archive_result == "succeeded",
+        staging_result=status_record.staging_result,
+        publish_result=status_record.publish_result,
+        archive_result=status_record.archive_result,
+        latest_action=status_record.latest_action,
+        rendered_files=status_record.rendered_files,
         generation_root=str(generation_root),
         latest_root=str(latest_root),
+        status_path=str(generation_root / "status.json"),
+        operation_log_path=str(operation_log_path),
         errors=tuple(errors),
     )
 
@@ -99,6 +96,7 @@ def _replace_directory_contents(target: Path, source: Path) -> None:
     swap_token = uuid4().hex
     staging_target = target.parent / f".{target.name}.incoming-{swap_token}"
     backup_target = target.parent / f".{target.name}.backup-{swap_token}"
+    latest_restored = False
 
     try:
         shutil.copytree(source, staging_target)
@@ -109,7 +107,11 @@ def _replace_directory_contents(target: Path, source: Path) -> None:
         except Exception as exc:
             if backup_target.exists() and not target.exists():
                 backup_target.replace(target)
-            raise PublishError(f"Failed to promote latest publish: {exc}") from exc
+                latest_restored = True
+            raise PublishSwapError(
+                f"Failed to promote latest publish: {exc}",
+                latest_restored=latest_restored,
+            ) from exc
         if backup_target.exists():
             shutil.rmtree(backup_target, ignore_errors=True)
     finally:
@@ -130,7 +132,9 @@ def _prepare_latest_publish_tree(
     else:
         staging_root.mkdir(parents=True, exist_ok=True)
 
-    route_prefixes = tuple(dict.fromkeys(get_screen_definition(screen_id).route_prefix for screen_id in affected_screens))
+    route_prefixes = tuple(
+        dict.fromkeys(get_screen_definition(screen_id).route_prefix for screen_id in affected_screens)
+    )
     for route_prefix in route_prefixes:
         target_root = staging_root / route_prefix
         if target_root.exists():
@@ -143,15 +147,19 @@ def _prepare_latest_publish_tree(
         shutil.copytree(source_root, staging_root / route_prefix)
 
 
-def _archive_generation(paths: HtmlOutputPaths, archive_month: str, source: Path) -> None:
-    archive_target = paths.archive_monthly_root / archive_month
+def _archive_generation(paths: HtmlOutputPaths, archive_target_period: str, source: Path) -> None:
+    archive_target = paths.archive_monthly_root / archive_target_period
     if archive_target.exists():
         raise PublishError(f"Archive target already exists: {archive_target}")
     archive_target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, archive_target)
 
 
-def _validate_acceptance(request: PublishRequest, affected_screens: tuple[str, ...], rendered_pages: list[RenderedPage]) -> tuple[bool, list[str]]:
+def _validate_acceptance(
+    request: PublishRequest,
+    affected_screens: tuple[str, ...],
+    rendered_pages: list[RenderedPage],
+) -> tuple[bool, list[str]]:
     errors: list[str] = []
     if not request.acceptance_passed:
         errors.append("acceptance gate reported failure")
@@ -165,23 +173,77 @@ def _validate_acceptance(request: PublishRequest, affected_screens: tuple[str, .
     return (len(errors) == 0, errors)
 
 
+def _status_from_failed_publish(
+    request: PublishRequest,
+    generation_root: Path,
+    latest_root: Path,
+    operation_log_path: Path,
+    *,
+    accepted: bool,
+    affected_screens: tuple[str, ...],
+    rendered_files: tuple[str, ...],
+    latest_action: LatestAction,
+    errors: tuple[str, ...],
+) -> PublishResult:
+    status_record = GenerationStatusRecord(
+        generation_id=request.generation_id,
+        accepted=accepted,
+        staging_result="succeeded",
+        publish_result="failed",
+        archive_result="skipped",
+        latest_action=latest_action,
+        affected_screens=affected_screens,
+        rendered_files=rendered_files,
+        publish_failures=errors,
+    )
+    _write_status(generation_root / "status.json", status_record)
+    _append_operation_log(
+        operation_log_path,
+        OperationLogRecord(
+            generation_id=request.generation_id,
+            step="publish",
+            outcome="failed",
+            failure_type="latest_publish_failure",
+            target="latest",
+            latest_affected=False,
+            latest_action=latest_action,
+            archive_only_failure=False,
+            retry_required=True,
+            message=errors[-1],
+        ),
+    )
+    return _build_result(
+        request,
+        generation_root,
+        latest_root,
+        status="publish_failed",
+        status_record=status_record,
+        operation_log_path=operation_log_path,
+    )
+
+
 def execute_publish(request: PublishRequest, output_root: Path | None = None) -> PublishResult:
     project_root = output_root or discover_project_root()
     paths = HtmlOutputPaths(project_root=project_root)
     affected_screens = resolve_affected_screens(request.change_set, request.additional_screens)
     generation_root = paths.generation_root(request.generation_id)
     public_root = paths.generation_public_root(request.generation_id)
-    generation_root.mkdir(parents=True, exist_ok=True)
+    operation_log_path = paths.operation_log_path(request.generation_id)
+    latest_exists_before = paths.latest_root.exists()
+
+    if generation_root.exists():
+        raise PublishError(f"Generation root already exists: {generation_root}")
+    generation_root.mkdir(parents=True, exist_ok=False)
 
     manifest = {
         "generation_id": request.generation_id,
         "generated_at": request.metadata.iso_generated_at(),
         "publish_mode": request.publish_mode,
-        "change_set": list(request.change_set),
-        "display_condition": dict(request.display_condition or {}),
+        "final_record_unit_change_set": [change.to_dict() for change in request.change_set],
+        "default_display_context": dict(request.default_display_context or {}),
         "evaluation_series": list(request.evaluation_series),
         "affected_screens": list(affected_screens),
-        "archive_month": request.archive_month,
+        "archive_target_period": request.archive_target_period,
     }
     _write_json(generation_root / "manifest.json", manifest)
 
@@ -190,36 +252,115 @@ def execute_publish(request: PublishRequest, output_root: Path | None = None) ->
         rendered_pages = render_many(render_inputs)
         _write_rendered_pages(public_root, rendered_pages)
     except Exception as exc:
+        latest_action: LatestAction = "preserved" if latest_exists_before else "unchanged"
+        status_record = GenerationStatusRecord(
+            generation_id=request.generation_id,
+            accepted=False,
+            staging_result="failed",
+            publish_result="skipped",
+            archive_result="skipped",
+            latest_action=latest_action,
+            affected_screens=affected_screens,
+            rendered_files=(),
+            render_failures=(str(exc),),
+        )
+        _write_status(generation_root / "status.json", status_record)
+        _append_operation_log(
+            operation_log_path,
+            OperationLogRecord(
+                generation_id=request.generation_id,
+                step="staging",
+                outcome="failed",
+                failure_type="render_failure",
+                target="render",
+                latest_affected=False,
+                latest_action=latest_action,
+                archive_only_failure=False,
+                retry_required=True,
+                message=str(exc),
+            ),
+        )
         return _build_result(
             request,
             generation_root,
             paths.latest_root,
-            status="failed",
-            accepted=False,
-            published=False,
-            archived=False,
-            errors=[str(exc)],
-            rendered_files=(),
+            status="render_failed",
+            status_record=status_record,
+            operation_log_path=operation_log_path,
         )
 
     accepted, acceptance_errors = _validate_acceptance(request, affected_screens, rendered_pages)
     rendered_files = tuple(page.relative_output_path.as_posix() for page in rendered_pages)
-    published = False
-    archived = False
-    errors = list(acceptance_errors)
+    initial_latest_action: LatestAction = "preserved" if latest_exists_before else "unchanged"
+    staged_status = GenerationStatusRecord(
+        generation_id=request.generation_id,
+        accepted=accepted,
+        staging_result="succeeded",
+        publish_result="skipped",
+        archive_result="skipped",
+        latest_action=initial_latest_action,
+        affected_screens=affected_screens,
+        rendered_files=rendered_files,
+        publish_failures=tuple(acceptance_errors),
+    )
+    _write_status(generation_root / "status.json", staged_status)
+    _append_operation_log(
+        operation_log_path,
+        OperationLogRecord(
+            generation_id=request.generation_id,
+            step="staging",
+            outcome="succeeded",
+            failure_type=None,
+            target=",".join(affected_screens),
+            latest_affected=False,
+            latest_action=initial_latest_action,
+            archive_only_failure=False,
+            retry_required=False,
+            message="staging completed and latest is still unchanged",
+        ),
+    )
 
     if request.publish_mode != "publish" or not accepted:
+        if request.publish_mode == "publish" and not accepted:
+            _append_operation_log(
+                operation_log_path,
+                OperationLogRecord(
+                    generation_id=request.generation_id,
+                    step="publish",
+                    outcome="skipped",
+                    failure_type="publish_precondition_failed",
+                    target="latest",
+                    latest_affected=False,
+                    latest_action=initial_latest_action,
+                    archive_only_failure=False,
+                    retry_required=True,
+                    message="publish preconditions were not satisfied",
+                ),
+            )
         return _build_result(
             request,
             generation_root,
             paths.latest_root,
             status="staged",
-            accepted=accepted,
-            published=False,
-            archived=False,
-            errors=errors,
-            rendered_files=rendered_files,
+            status_record=staged_status,
+            operation_log_path=operation_log_path,
         )
+
+    _append_operation_log(
+        operation_log_path,
+        OperationLogRecord(
+            generation_id=request.generation_id,
+            step="publish",
+            outcome="started",
+            failure_type=None,
+            target="latest",
+            latest_affected=True,
+            latest_action="unchanged",
+            archive_only_failure=False,
+            retry_required=False,
+            message="publish preconditions satisfied and latest merge is starting",
+        ),
+    )
 
     try:
         merged_latest_root = generation_root / ".latest-merged"
@@ -227,50 +368,126 @@ def execute_publish(request: PublishRequest, output_root: Path | None = None) ->
             paths.latest_root.parent.mkdir(parents=True, exist_ok=True)
             _prepare_latest_publish_tree(paths.latest_root, public_root, affected_screens, merged_latest_root)
             _replace_directory_contents(paths.latest_root, merged_latest_root)
-            published = True
         finally:
             if merged_latest_root.exists():
                 shutil.rmtree(merged_latest_root, ignore_errors=True)
-    except Exception as exc:
-        errors.append(str(exc))
-        return _build_result(
+    except PublishSwapError as exc:
+        latest_action = "restored" if exc.latest_restored else ("preserved" if latest_exists_before else "unchanged")
+        return _status_from_failed_publish(
             request,
             generation_root,
             paths.latest_root,
-            status="failed",
+            operation_log_path,
             accepted=accepted,
-            published=False,
-            archived=False,
-            errors=errors,
+            affected_screens=affected_screens,
             rendered_files=rendered_files,
+            latest_action=latest_action,
+            errors=(str(exc),),
+        )
+    except Exception as exc:
+        latest_action = "preserved" if latest_exists_before else "unchanged"
+        return _status_from_failed_publish(
+            request,
+            generation_root,
+            paths.latest_root,
+            operation_log_path,
+            accepted=accepted,
+            affected_screens=affected_screens,
+            rendered_files=rendered_files,
+            latest_action=latest_action,
+            errors=(str(exc),),
         )
 
-    if request.archive_month:
+    _append_operation_log(
+        operation_log_path,
+        OperationLogRecord(
+            generation_id=request.generation_id,
+            step="publish",
+            outcome="succeeded",
+            failure_type=None,
+            target="latest",
+            latest_affected=True,
+            latest_action="published",
+            archive_only_failure=False,
+            retry_required=False,
+            message="latest merged publish completed",
+        ),
+    )
+
+    if request.archive_target_period:
         try:
-            _archive_generation(paths, request.archive_month, public_root)
-            archived = True
+            _archive_generation(paths, request.archive_target_period, paths.latest_root)
         except Exception as exc:
-            errors.append(str(exc))
+            status_record = GenerationStatusRecord(
+                generation_id=request.generation_id,
+                accepted=True,
+                staging_result="succeeded",
+                publish_result="succeeded",
+                archive_result="failed",
+                latest_action="published",
+                affected_screens=affected_screens,
+                rendered_files=rendered_files,
+                archive_failures=(str(exc),),
+            )
+            _write_status(generation_root / "status.json", status_record)
+            _append_operation_log(
+                operation_log_path,
+                OperationLogRecord(
+                    generation_id=request.generation_id,
+                    step="archive",
+                    outcome="failed",
+                    failure_type="archive_failure",
+                    target=request.archive_target_period,
+                    latest_affected=False,
+                    latest_action="published",
+                    archive_only_failure=True,
+                    retry_required=True,
+                    message=str(exc),
+                ),
+            )
             return _build_result(
                 request,
                 generation_root,
                 paths.latest_root,
-                status="failed",
-                accepted=accepted,
-                published=True,
-                archived=False,
-                errors=errors,
-                rendered_files=rendered_files,
+                status="published_with_archive_failure",
+                status_record=status_record,
+                operation_log_path=operation_log_path,
             )
+        _append_operation_log(
+            operation_log_path,
+            OperationLogRecord(
+                generation_id=request.generation_id,
+                step="archive",
+                outcome="succeeded",
+                failure_type=None,
+                target=request.archive_target_period,
+                latest_affected=False,
+                latest_action="published",
+                archive_only_failure=False,
+                retry_required=False,
+                message="archive export completed from successful latest publish",
+            ),
+        )
+        archive_result = "succeeded"
+    else:
+        archive_result = "skipped"
 
+    status_record = GenerationStatusRecord(
+        generation_id=request.generation_id,
+        accepted=True,
+        staging_result="succeeded",
+        publish_result="succeeded",
+        archive_result=archive_result,
+        latest_action="published",
+        affected_screens=affected_screens,
+        rendered_files=rendered_files,
+    )
+    _write_status(generation_root / "status.json", status_record)
     return _build_result(
         request,
         generation_root,
         paths.latest_root,
-        status="success",
-        accepted=accepted,
-        published=published,
-        archived=archived,
-        errors=errors,
-        rendered_files=rendered_files,
+        status="published",
+        status_record=status_record,
+        operation_log_path=operation_log_path,
     )

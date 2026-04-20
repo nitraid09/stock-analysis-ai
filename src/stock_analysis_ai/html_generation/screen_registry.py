@@ -1,4 +1,4 @@
-"""Registry and regeneration grouping for public HTML screens."""
+"""Registry and record-unit-to-screen resolution for public HTML screens."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 from typing import Iterable
 from urllib.parse import quote
 
-from .contracts import ScreenDefinition
+from .contracts import RecordUnitChange, ScreenDefinition
 from .exceptions import ContractError
 
 DEFAULT_QUERY_KEYS = ("series", "scope", "status", "sort", "period", "snapshot", "reconciliation")
@@ -179,14 +179,33 @@ SCREEN_REGISTRY: "OrderedDict[str, ScreenDefinition]" = OrderedDict(
     )
 )
 
-REGENERATION_GROUPS: dict[str, tuple[str, ...]] = {
+MANDATORY_SCREEN_GROUPS: dict[str, tuple[str, ...]] = {
     "proposal": ("top", "proposal_list", "proposal_detail"),
-    "order": ("top", "orders", "excluded_trades", "proposal_detail"),
+    "order": ("top", "orders"),
     "holding_snapshot": ("top", "holdings", "performance"),
-    "review": ("reviews", "monthly_review"),
+    "review": ("reviews",),
     "us_virtual": ("us_watch", "us_virtual_performance"),
     "us_pilot": ("us_pilot_performance",),
-    "market_overview": ("top", "market_overview"),
+}
+
+CONDITIONAL_SCREEN_GROUPS: dict[str, dict[str, tuple[str, ...]]] = {
+    "proposal": {
+        "market_context_changed": ("market_overview",),
+    },
+    "order": {
+        "excluded_trade_state_changed": ("excluded_trades",),
+    },
+    "holding_snapshot": {
+        "monthly_metrics_changed": ("monthly_review",),
+    },
+    "review": {
+        "monthly_review_changed": ("monthly_review",),
+        "market_context_changed": ("market_overview",),
+        "top_summary_changed": ("top",),
+    },
+    "us_pilot": {
+        "top_summary_changed": ("top",),
+    },
 }
 
 
@@ -213,12 +232,37 @@ def build_screen_output_path(screen_id: str, natural_key: str | None = None) -> 
     return PurePosixPath(definition.route_prefix) / "index.html"
 
 
-def resolve_affected_screens(change_set: Iterable[str], additional_screen_ids: Iterable[str] = ()) -> tuple[str, ...]:
+def _resolve_change_entry_screens(change: RecordUnitChange) -> tuple[str, ...]:
+    if change.record_unit not in MANDATORY_SCREEN_GROUPS:
+        raise ContractError(f"Unknown record unit: {change.record_unit}")
+    ordered: OrderedDict[str, None] = OrderedDict()
+    for screen_id in MANDATORY_SCREEN_GROUPS[change.record_unit]:
+        ordered[screen_id] = None
+    conditional_map = CONDITIONAL_SCREEN_GROUPS.get(change.record_unit, {})
+    unknown_flags = [
+        flag_name
+        for flag_name, enabled in change.conditional_flags.items()
+        if enabled and flag_name not in conditional_map
+    ]
+    if unknown_flags:
+        raise ContractError(
+            f"Unsupported conditional flags for {change.record_unit}: {', '.join(unknown_flags)}"
+        )
+    for flag_name, enabled in change.conditional_flags.items():
+        if not enabled:
+            continue
+        for screen_id in conditional_map.get(flag_name, ()):
+            ordered[screen_id] = None
+    return tuple(ordered.keys())
+
+
+def resolve_affected_screens(
+    change_set: Iterable[RecordUnitChange],
+    additional_screen_ids: Iterable[str] = (),
+) -> tuple[str, ...]:
     ordered: OrderedDict[str, None] = OrderedDict()
     for change in change_set:
-        if change not in REGENERATION_GROUPS:
-            raise ContractError(f"Unknown change set token: {change}")
-        for screen_id in REGENERATION_GROUPS[change]:
+        for screen_id in _resolve_change_entry_screens(change):
             ordered[screen_id] = None
     for screen_id in additional_screen_ids:
         get_screen_definition(screen_id)

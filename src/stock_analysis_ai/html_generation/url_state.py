@@ -23,6 +23,8 @@ class UrlState:
             raise ContractError("path must not contain query or hash fragments.")
         if self.anchor and self.anchor.startswith("#"):
             raise ContractError("anchor must not include a leading '#'.")
+        if self.anchor and any(token in self.anchor for token in ("?", "#", "/")):
+            raise ContractError("anchor must only represent an in-page stable-key fragment.")
 
     def as_url(self) -> str:
         query_string = urlencode([(key, value) for key, value in self.query.items() if value != ""])

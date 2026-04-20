@@ -60,3 +60,43 @@ def test_renderer_keeps_non_active_and_zero_new_entry_records_visible() -> None:
     assert "無効化対象" in html
     assert "見送り提案" in html
     assert "新規建てゼロ提案" in html
+
+
+def test_renderer_supports_all_required_stable_key_anchor_prefixes() -> None:
+    metadata = GenerationMetadata("gen-003")
+    render_input = RenderInput(
+        screen_id="orders",
+        title="注文・約定履歴",
+        relative_output_path=build_screen_output_path("orders"),
+        page_data={
+            "sections": [
+                {
+                    "id": "orders",
+                    "title": "注文一覧",
+                    "records": [
+                        {"title": "注文", "anchor_kind": "order", "anchor_key": "O-001", "text": "order"},
+                        {
+                            "title": "ポジションサイクル",
+                            "anchor_kind": "position_cycle",
+                            "anchor_key": "PC-001",
+                            "text": "cycle",
+                        },
+                        {"title": "振り返り", "anchor_kind": "review", "anchor_key": "R-001", "text": "review"},
+                        {"title": "スナップショット", "anchor_kind": "snapshot", "anchor_key": "S-001", "text": "snapshot"},
+                        {"title": "米国仮想", "anchor_kind": "us_virtual", "anchor_key": "UV-001", "text": "us virtual"},
+                        {"title": "米国パイロット", "anchor_kind": "us_pilot", "anchor_key": "UP-001", "text": "us pilot"},
+                    ],
+                }
+            ]
+        },
+        shared_data={},
+        metadata=metadata,
+    )
+
+    html = render_many([render_input])[0].html
+    assert 'id="order-O-001"' in html
+    assert 'id="position-cycle-PC-001"' in html
+    assert 'id="review-R-001"' in html
+    assert 'id="snapshot-S-001"' in html
+    assert 'id="us-virtual-UV-001"' in html
+    assert 'id="us-pilot-UP-001"' in html

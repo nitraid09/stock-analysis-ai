@@ -32,9 +32,9 @@ _ALIASES = {
 }
 
 _STATE_LABELS = {
-    "empty": StateLabel("empty", "empty", "当該条件で抽出した結果が0件"),
-    "none": StateLabel("none", "none", "現在その対象自体が存在しない"),
-    "not_applicable": StateLabel("not_applicable", "not_applicable", "当該系列、列、画面には適用対象外"),
+    "empty": StateLabel("empty", "抽出結果なし", "当該条件で抽出した結果が0件"),
+    "none": StateLabel("none", "対象なし", "現在その対象自体が存在しない"),
+    "not_applicable": StateLabel("not_applicable", "適用対象外", "当該系列、列、画面には適用対象外"),
     "unrecorded": StateLabel("unrecorded", "未記録", "本来記録対象となり得るが、まだ正式記録が存在しない"),
     "excluded": StateLabel("excluded", "評価対象外", "記録済みだが評価系列集計へ算入しない"),
     "unavailable": StateLabel("unavailable", "参照不能", "関連リンクまたは証跡参照が現在辿れない"),

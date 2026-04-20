@@ -11,7 +11,8 @@ def test_cli_executes_publish(tmp_path: Path, capsys) -> None:
     payload_path.write_text(
         json.dumps(
             {
-                "change_set": ["proposal"],
+                "final_record_unit_change_set": ["proposal"],
+                "default_display_context": {"series": "ai_official"},
                 "shared": {},
                 "screens": {
                     "top": {"sections": [{"id": "summary", "title": "上段全幅サマリ", "text": "summary"}]},
@@ -41,4 +42,5 @@ def test_cli_executes_publish(tmp_path: Path, capsys) -> None:
     assert exit_code == 0
     result = json.loads(captured.out)
     assert result["published"] is True
+    assert result["status"] == "published"
     assert (tmp_path / "generated_html" / "latest" / "proposal_detail" / "P-001.html").exists()

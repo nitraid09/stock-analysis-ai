@@ -28,11 +28,18 @@ class HtmlOutputPaths:
     def archive_monthly_root(self) -> Path:
         return self.project_root / "archive" / "monthly"
 
+    @property
+    def operations_log_root(self) -> Path:
+        return self.project_root / "logs" / "operations" / "html_generation"
+
     def generation_root(self, generation_id: str) -> Path:
         return self.generations_root / generation_id
 
     def generation_public_root(self, generation_id: str) -> Path:
         return self.generation_root(generation_id) / "public"
+
+    def operation_log_path(self, generation_id: str) -> Path:
+        return self.operations_log_root / f"{generation_id}.jsonl"
 
 
 def discover_project_root() -> Path:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from stock_analysis_ai.html_generation.url_state import build_screen_url, normalize_query_state
+import pytest
+
+from stock_analysis_ai.html_generation.exceptions import ContractError
+from stock_analysis_ai.html_generation.url_state import UrlState, build_screen_url, normalize_query_state
 
 
 def test_missing_query_uses_defaults() -> None:
@@ -27,3 +30,8 @@ def test_url_keeps_path_query_hash_separate() -> None:
         anchor="proposal-P-001",
     )
     assert url == "proposal_list/index.html?series=real&status=active&sort=priority#proposal-P-001"
+
+
+def test_anchor_rejects_path_or_query_tokens() -> None:
+    with pytest.raises(ContractError):
+        UrlState(path="proposal_list/index.html", query={}, anchor="proposal-P-001?sort=1")

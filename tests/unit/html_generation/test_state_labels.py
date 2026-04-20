@@ -13,3 +13,9 @@ def test_japanese_aliases_map_to_distinct_states() -> None:
     assert get_state_label("評価対象外").code == "excluded"
     assert get_state_label("参照不能").code == "unavailable"
     assert get_state_label("再生成失敗").code == "regeneration_failed"
+
+
+def test_empty_none_and_not_applicable_have_distinct_display_labels() -> None:
+    assert get_state_label("empty").label == "抽出結果なし"
+    assert get_state_label("none").label == "対象なし"
+    assert get_state_label("not_applicable").label == "適用対象外"
