@@ -133,14 +133,31 @@ def _process_order_updates(
 def _derive_publish_status(result: PublishResult | None, publish_mode: PublishMode) -> tuple[str, str, str]:
     if result is None:
         return ("not_started", "not_started", "not_attempted")
+
     if publish_mode == "stage_only":
-        return ("not_published", "not_requested", "not_attempted")
-    if result.published:
-        archive_status = "archived" if result.archived else "failed" if result.errors else "not_requested"
-        return ("published", archive_status, "not_needed")
-    if result.status == "failed":
-        return ("failed", "not_requested", "kept_previous_latest")
-    return ("not_published", "not_requested", "not_attempted")
+        return ("not_requested", "not_requested", "not_attempted")
+
+    restore_status_map = {
+        "preserved": "preserved",
+        "restored": "restored",
+        "published": "published",
+        "unchanged": "not_needed",
+    }
+    restore_status = restore_status_map[result.latest_action]
+
+    if result.status == "published":
+        archive_status = "archived" if result.archived else "not_requested"
+        return ("published", archive_status, restore_status)
+    if result.status == "published_with_archive_failure":
+        return ("published", "failed", restore_status)
+    if result.status == "publish_failed":
+        return ("publish_failed", "not_attempted", restore_status)
+    if result.status == "render_failed":
+        return ("render_failed", "not_attempted", restore_status)
+    if result.status == "staged":
+        return ("not_attempted", "not_attempted", restore_status)
+
+    raise ContractError(f"Unsupported publish result status: {result.status}")
 
 
 def execute_night_update(

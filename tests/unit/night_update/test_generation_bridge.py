@@ -55,7 +55,7 @@ def test_bridge_passes_minimum_contract_into_html_publish_pipeline(monkeypatch, 
 
     assert result.status == "success"
     assert captured["request"].generation_id == "gen-bridge"
-    assert captured["request"].change_set == ("proposal",)
+    assert tuple(change.record_unit for change in captured["request"].change_set) == ("proposal",)
     assert captured["request"].publish_mode == "publish"
     assert captured["request"].display_condition == {"series": "ai_official"}
     assert captured["request"].evaluation_series == ("ai_official",)

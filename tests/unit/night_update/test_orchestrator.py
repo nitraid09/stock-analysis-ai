@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 
 from stock_analysis_ai.master_storage import MasterStorageRepository
-from stock_analysis_ai.night_update.orchestrator import NightUpdateRequest, execute_night_update
+from stock_analysis_ai.night_update.orchestrator import (
+    NightUpdateRequest,
+    _derive_publish_status,
+    execute_night_update,
+)
+from stock_analysis_ai.html_generation.contracts import PublishResult
 
 
 def _proposal_payload(*, list_text: str = "active", detail_text: str = "detail") -> dict:
@@ -85,11 +90,18 @@ def test_generation_failure_does_not_roll_back_master_or_dirty_latest(tmp_path) 
 
     assert failed.master_update_status == "success"
     assert failed.publish_result is not None
-    assert failed.publish_result.status == "failed"
+    assert failed.publish_result.status == "render_failed"
     assert latest_detail.read_text(encoding="utf-8") == previous_latest
     repository = MasterStorageRepository(tmp_path)
     proposal_ids = {row["proposal_id"] for row in repository.load_snapshot().tables["proposal_header"]}
     assert proposal_ids == {"proposal-000001", "proposal-000002"}
+
+    log_lines = (tmp_path / "logs" / "night_update_operations.jsonl").read_text(encoding="utf-8").splitlines()
+    last_log = json.loads(log_lines[-1])
+    assert last_log["generation_status"] == "render_failed"
+    assert last_log["publish_status"] == "render_failed"
+    assert last_log["archive_status"] == "not_attempted"
+    assert last_log["restore_status"] == "preserved"
 
 
 def test_archive_failure_is_recorded_separately_from_latest_publish(tmp_path) -> None:
@@ -134,12 +146,14 @@ def test_archive_failure_is_recorded_separately_from_latest_publish(tmp_path) ->
     assert second.publish_result is not None
     assert second.publish_result.published is True
     assert second.publish_result.archived is False
-    latest_month = tmp_path / "generated_html" / "latest" / "monthly_review" / "2026-04.html"
-    assert "month-updated" in latest_month.read_text(encoding="utf-8")
+    latest_reviews = tmp_path / "generated_html" / "latest" / "reviews" / "index.html"
+    assert "review-updated" in latest_reviews.read_text(encoding="utf-8")
     log_lines = (tmp_path / "logs" / "night_update_operations.jsonl").read_text(encoding="utf-8").splitlines()
     last_log = json.loads(log_lines[-1])
+    assert last_log["generation_status"] == "published_with_archive_failure"
     assert last_log["publish_status"] == "published"
     assert last_log["archive_status"] == "failed"
+    assert last_log["restore_status"] == "published"
 
 
 def test_merged_publish_keeps_unrelated_latest_screens(tmp_path) -> None:
@@ -236,3 +250,92 @@ def test_us_pilot_generation_runs_only_when_us_pilot_rows_change(tmp_path) -> No
     assert result.change_set.changed_record_units == ("us_pilot",)
     pilot_page = tmp_path / "generated_html" / "latest" / "us_pilot_performance" / "index.html"
     assert pilot_page.exists()
+
+
+def test_stage_only_records_publish_and_restore_as_not_requested(tmp_path) -> None:
+    execute_night_update(
+        NightUpdateRequest(
+            generation_id="gen-published",
+            publish_mode="publish",
+            html_payload=_proposal_payload(detail_text="published-detail"),
+            display_condition={"series": "ai_official"},
+            table_updates={
+                "proposal_header": [{"proposal_id": "proposal-000001"}],
+            },
+        ),
+        project_root=tmp_path,
+    )
+
+    result = execute_night_update(
+        NightUpdateRequest(
+            generation_id="gen-stage-only",
+            publish_mode="stage_only",
+            html_payload=_proposal_payload(detail_text="staged-detail"),
+            display_condition={"series": "ai_official"},
+            table_updates={
+                "proposal_header": [{"proposal_id": "proposal-000002"}],
+            },
+        ),
+        project_root=tmp_path,
+    )
+
+    assert result.publish_result is not None
+    assert result.publish_result.status == "staged"
+    latest_detail = tmp_path / "generated_html" / "latest" / "proposal_detail" / "proposal-000001.html"
+    assert "published-detail" in latest_detail.read_text(encoding="utf-8")
+
+    log_lines = (tmp_path / "logs" / "night_update_operations.jsonl").read_text(encoding="utf-8").splitlines()
+    last_log = json.loads(log_lines[-1])
+    assert last_log["generation_status"] == "staged"
+    assert last_log["publish_status"] == "not_requested"
+    assert last_log["archive_status"] == "not_requested"
+    assert last_log["restore_status"] == "not_attempted"
+
+
+def test_derive_publish_status_handles_contract_statuses_and_latest_actions() -> None:
+    def publish_result(*, status: str, latest_action: str, archived: bool = False) -> PublishResult:
+        return PublishResult(
+            generation_id=f"gen-{status}-{latest_action}",
+            status=status,
+            accepted=status != "render_failed",
+            published=status in {"published", "published_with_archive_failure"},
+            archived=archived,
+            staging_result="succeeded" if status != "render_failed" else "failed",
+            publish_result="succeeded" if status in {"published", "published_with_archive_failure"} else "failed" if status == "publish_failed" else "skipped",
+            archive_result="succeeded" if archived else "failed" if status == "published_with_archive_failure" else "skipped",
+            latest_action=latest_action,
+            rendered_files=("top/index.html",),
+            generation_root="gen-root",
+            latest_root="latest-root",
+            status_path="status.json",
+            operation_log_path="operation.jsonl",
+        )
+
+    assert _derive_publish_status(
+        publish_result(status="render_failed", latest_action="preserved"),
+        "publish",
+    ) == ("render_failed", "not_attempted", "preserved")
+    assert _derive_publish_status(
+        publish_result(status="publish_failed", latest_action="restored"),
+        "publish",
+    ) == ("publish_failed", "not_attempted", "restored")
+    assert _derive_publish_status(
+        publish_result(status="published_with_archive_failure", latest_action="published"),
+        "publish",
+    ) == ("published", "failed", "published")
+    assert _derive_publish_status(
+        publish_result(status="published", latest_action="published", archived=False),
+        "publish",
+    ) == ("published", "not_requested", "published")
+    assert _derive_publish_status(
+        publish_result(status="published", latest_action="published", archived=True),
+        "publish",
+    ) == ("published", "archived", "published")
+    assert _derive_publish_status(
+        publish_result(status="staged", latest_action="unchanged"),
+        "publish",
+    ) == ("not_attempted", "not_attempted", "not_needed")
+    assert _derive_publish_status(
+        publish_result(status="staged", latest_action="preserved"),
+        "stage_only",
+    ) == ("not_requested", "not_requested", "not_attempted")

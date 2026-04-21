@@ -54,4 +54,4 @@ def test_cli_runs_night_update_with_explicit_generation_and_publish_mode(tmp_pat
 
     assert exit_code == 0
     assert (tmp_path / "master" / "storage" / "master_storage.sqlite3").exists()
-    assert (tmp_path / "generated_html" / "latest" / "monthly_review" / "2026-04.html").exists()
+    assert (tmp_path / "generated_html" / "latest" / "reviews" / "index.html").exists()
